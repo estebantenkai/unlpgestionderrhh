@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Prueba de carga GDPO</title>
+<style>
+:root{--bg:#F3F4F1;--paper:#fff;--ink:#101B1A;--sub:#53605E;--rule:#D5DAD6;--brand:#0A5C59;--ok:#257A47;--no:#A93A2A;--warn:#B07A08;color-scheme:light}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#0C1312;--paper:#131D1C;--ink:#E4ECEA;--sub:#9DAEAA;--rule:#26332F;--brand:#5FB8AF;--ok:#62C08A;--no:#E77E6C;--warn:#E7B13E;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0C1312;--paper:#131D1C;--ink:#E4ECEA;--sub:#9DAEAA;--rule:#26332F;--brand:#5FB8AF;--ok:#62C08A;--no:#E77E6C;--warn:#E7B13E;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,"Segoe UI",sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:28px 16px 60px}
+h1{font-size:26px;margin:0 0 6px}
+.card{background:var(--paper);border:1px solid var(--rule);border-radius:6px;padding:18px 20px;margin-top:18px}
+label{display:block;font-weight:600;font-size:13px;margin:12px 0 5px}
+input,select{font:inherit;color:inherit;background:var(--paper);border:1px solid var(--rule);border-radius:4px;padding:8px 10px;width:100%}
+.row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+button{font:600 14px system-ui;background:var(--brand);color:#fff;border:0;border-radius:4px;padding:10px 16px;cursor:pointer;margin-top:16px}
+button[disabled]{opacity:.5}
+.sub{color:var(--sub);font-size:13.5px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin-top:8px}
+td,th{padding:7px 6px;border-bottom:1px solid var(--rule);text-align:left}
+td.n{font-family:ui-monospace,Menlo,monospace;text-align:right}
+.ok{color:var(--ok)} .no{color:var(--no)} .warn{color:var(--warn)}
+pre{white-space:pre-wrap;font-size:12.5px;background:var(--bg);padding:10px;border-radius:4px}
+@media (max-width:640px){.row{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Prueba de carga de la Bitácora GDPO</h1>
+  <p class="sub">Simula alumnos entrando y entregando al mismo tiempo contra el backend real de Apps Script. Cada alumno virtual hace lo mismo que uno de verdad en un checkpoint: dos lecturas, una entrega, otra lectura y otra entrega.</p>
+  <div class="card">
+    <b>Antes de empezar</b>
+    <ol class="sub" style="margin:8px 0 0;padding-left:18px">
+      <li>En la planilla, hoja Config, poné <code>prueba_carga</code> en <b>SI</b> y ejecutá <code>limpiarCache()</code>.</li>
+      <li>Pegá abajo la URL de la aplicación web (termina en <code>/exec</code>).</li>
+      <li>Al terminar, volvé a poner <code>prueba_carga</code> en <b>NO</b>, ejecutá <code>limpiarCache()</code> y borrá las filas de la hoja Carga.</li>
+    </ol>
+    <label for="url">URL de la aplicación web</label>
+    <input id="url" placeholder="https://script.google.com/macros/s/…/exec">
+    <div class="row">
+      <div><label for="n">Alumnos virtuales</label><select id="n"><option>30</option><option selected>150</option><option>300</option><option>400</option></select></div>
+      <div><label for="v">Llegan durante</label><select id="v"><option value="20">20 segundos (extremo)</option><option value="120" selected>2 minutos (todos en clase)</option><option value="600">10 minutos</option><option value="3600">1 hora (cierre)</option></select></div>
+      <div><label for="p">Pausa entre pasos</label><select id="p"><option value="2">2 s (peor caso)</option><option value="15" selected>15 s</option><option value="45">45 s (realista)</option></select></div>
+    </div>
+    <button id="go">Empezar la prueba</button>
+    <p class="sub" id="estado" style="margin-top:12px"></p>
+  </div>
+  <div class="card" id="res" hidden>
+    <b>Resultados</b>
+    <table>
+      <thead><tr><th>Pedido</th><th>Cantidad</th><th>Mediana</th><th>p95</th><th>Máximo</th><th>Errores</th></tr></thead>
+      <tbody id="tb"></tbody>
+    </table>
+    <p id="veredicto" style="margin-top:14px"></p>
+    <p class="sub">Copiá este bloque y pegalo en el hilo:</p>
+    <pre id="txt"></pre>
+  </div>
+</div>
+<script>
+(function () {
+  var $ = function (s) { return document.querySelector(s); };
+  try { $('#url').value = localStorage.getItem('gdpo-carga-url') || ''; } catch (e) {}
+  function pedir(url, cuerpo) {
+    var t0 = performance.now();
+    return fetch(url, { method: 'POST', body: JSON.stringify(cuerpo), headers: { 'Content-Type': 'text/plain;charset=utf-8' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { return { ms: performance.now() - t0, ok: !!j.ok, err: j.error, bloqueo: j.bloqueo }; })
+      .catch(function (e) { return { ms: performance.now() - t0, ok: false, err: 'red' }; });
+  }
+  var espera = function (s) { return new Promise(function (r) { setTimeout(r, s * 1000); }); };
+  function pct(a, q) { if (!a.length) return 0; var s = a.slice().sort(function (x, y) { return x - y; }); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; }
+  $('#go').onclick = function () {
+    var url = $('#url').value.trim();
+    if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(url)) { $('#estado').textContent = 'La URL tiene que ser la de la aplicación web y terminar en /exec.'; return; }
+    try { localStorage.setItem('gdpo-carga-url', url); } catch (e) {}
+    var N = +$('#n').value, V = +$('#v').value, P = +$('#p').value;
+    var R = { leer: [], escribir: [] }, E = { leer: {}, escribir: {} }, hechos = 0, t0 = Date.now();
+    this.disabled = true;
+    pedir(url, { accion: 'carga', tipo: 'leer', quien: 'chequeo' }).then(function (c) {
+      if (c.err === 'deshabilitado') { $('#estado').textContent = 'El backend respondió, pero prueba_carga está en NO. Cambialo a SI y ejecutá limpiarCache().'; $('#go').disabled = false; return; }
+      if (!c.ok) { $('#estado').textContent = 'No se pudo conectar con el backend (' + c.err + '). Revisá la URL y que la implementación sea "Cualquier persona".'; $('#go').disabled = false; return; }
+      var pasos = ['leer', 'leer', 'escribir', 'leer', 'escribir'];
+      var alumnos = [];
+      for (var i = 0; i < N; i++) (function (i) {
+        alumnos.push(espera(Math.random() * V).then(function () {
+          var cadena = Promise.resolve();
+          pasos.forEach(function (tipo, k) {
+            cadena = cadena.then(function () { return k ? espera(P * (0.5 + Math.random())) : null; })
+              .then(function () { return pedir(url, { accion: 'carga', tipo: tipo, quien: 'virtual-' + i, dato: 'paso ' + k }); })
+              .then(function (r) { R[tipo].push(r.ms); if (!r.ok) E[tipo][r.err] = (E[tipo][r.err] || 0) + 1; });
+          });
+          return cadena.then(function () { hechos++; $('#estado').textContent = hechos + ' de ' + N + ' alumnos virtuales terminaron · ' + Math.round((Date.now() - t0) / 1000) + ' s'; });
+        }));
+      })(i);
+      $('#estado').textContent = 'Corriendo… no cierres esta pestaña.';
+      Promise.all(alumnos).then(function () {
+        var filas = [], txt = 'Prueba de carga GDPO · ' + N + ' alumnos en ' + V + ' s · pausa ' + P + ' s · ' + new Date().toLocaleString('es-AR') + '\n';
+        var peor = 0, errores = 0;
+        ['leer', 'escribir'].forEach(function (t) {
+          var e = Object.keys(E[t]).map(function (k) { errores += E[t][k]; return k + ': ' + E[t][k]; }).join(', ') || '0';
+          var p95 = pct(R[t], .95); peor = Math.max(peor, p95);
+          filas.push('<tr><td>' + (t === 'leer' ? 'Lectura' : 'Entrega') + '</td><td class="n">' + R[t].length + '</td><td class="n">' + (pct(R[t], .5) / 1000).toFixed(2) + ' s</td><td class="n">' + (p95 / 1000).toFixed(2) + ' s</td><td class="n">' + (Math.max.apply(null, R[t]) / 1000).toFixed(2) + ' s</td><td class="n">' + e + '</td></tr>');
+          txt += (t === 'leer' ? 'Lectura' : 'Entrega') + ': n=' + R[t].length + ' mediana=' + (pct(R[t], .5) / 1000).toFixed(2) + 's p95=' + (p95 / 1000).toFixed(2) + 's max=' + (Math.max.apply(null, R[t]) / 1000).toFixed(2) + 's errores=' + e + '\n';
+        });
+        $('#tb').innerHTML = filas.join('');
+        $('#veredicto').innerHTML = errores === 0 && peor < 4000 ? '<b class="ok">Viable con holgura.</b> Ningún error y el 95 % de los pedidos respondió en menos de 4 segundos.'
+          : errores / (N * 5) < 0.01 && peor < 10000 ? '<b class="warn">Viable con margen justo.</b> Hubo demoras; conviene escalonar por comisión.'
+          : '<b class="no">No aguanta este escenario.</b> Pegá el resultado en el hilo para ver alternativas.';
+        $('#txt').textContent = txt;
+        $('#res').hidden = false; $('#go').disabled = false;
+      });
+    });
+  };
+})();
+</script>
+</body>
+</html>
